@@ -1,0 +1,108 @@
+name: Update Angie Tarball
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Run daily at midnight UTC
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  update_angie:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch actual latest Angie tarball name
+        id: get_actual_latest_version
+        run: |
+          ACTUAL_LATEST_TARBALL_NAME=$(curl -s https://download.angie.software/files/ | grep -oP 'angie-\d+\.\d+\.\d+\.tar\.gz' | sort -V | tail -n 1)
+          if [ -z "$ACTUAL_LATEST_TARBALL_NAME" ]; then
+            echo "Could not determine the actual latest Angie tarball name."
+            exit 1
+          fi
+          echo "Actual latest tarball name from website: $ACTUAL_LATEST_TARBALL_NAME"
+          echo "ACTUAL_LATEST_TARBALL_NAME=$ACTUAL_LATEST_TARBALL_NAME" >> $GITHUB_OUTPUT
+          echo "DOWNLOAD_URL=https://download.angie.software/files/$ACTUAL_LATEST_TARBALL_NAME" >> $GITHUB_OUTPUT
+
+      - name: Compare with current version in repo
+        id: check_version
+        run: |
+          VERSION_FILE_PATH=".current_angie_version"
+          REPO_TARBALL_PATH="angie-latest.tar.gz"
+          ACTUAL_LATEST_NAME="${{ steps.get_actual_latest_version.outputs.ACTUAL_LATEST_TARBALL_NAME }}"
+          
+          CURRENT_REPO_VERSION=""
+          if [ -f "$VERSION_FILE_PATH" ]; then
+            CURRENT_REPO_VERSION=$(cat "$VERSION_FILE_PATH")
+            echo "Current version in repo ($VERSION_FILE_PATH): $CURRENT_REPO_VERSION"
+          else
+            echo "$VERSION_FILE_PATH not found."
+          fi
+
+          if [ ! -f "$REPO_TARBALL_PATH" ]; then
+            echo "$REPO_TARBALL_PATH not found in repo. Update needed."
+            echo "NEEDS_UPDATE=true" >> $GITHUB_OUTPUT
+          elif [ "$CURRENT_REPO_VERSION" != "$ACTUAL_LATEST_NAME" ]; then
+            echo "Repo version ($CURRENT_REPO_VERSION) differs from latest website version ($ACTUAL_LATEST_NAME). Update needed."
+            echo "NEEDS_UPDATE=true" >> $GITHUB_OUTPUT
+          else
+            echo "Repo version ($CURRENT_REPO_VERSION) is already the latest. No update needed."
+            echo "NEEDS_UPDATE=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download, rename, and update version file
+        if: steps.check_version.outputs.NEEDS_UPDATE == 'true'
+        run: |
+          REPO_TARBALL_PATH="angie-latest.tar.gz"
+          VERSION_FILE_PATH=".current_angie_version"
+          ACTUAL_LATEST_NAME="${{ steps.get_actual_latest_version.outputs.ACTUAL_LATEST_TARBALL_NAME }}"
+          DOWNLOAD_URL="${{ steps.get_actual_latest_version.outputs.DOWNLOAD_URL }}"
+
+          echo "Update required. Proceeding with download and replacement."
+
+          echo "Removing old $REPO_TARBALL_PATH if it exists..."
+          rm -f $REPO_TARBALL_PATH
+
+          echo "Downloading $ACTUAL_LATEST_NAME from $DOWNLOAD_URL..."
+          curl -LO "$DOWNLOAD_URL"
+          if [ ! -f "$ACTUAL_LATEST_NAME" ]; then
+            echo "Failed to download $ACTUAL_LATEST_NAME."
+            exit 1
+          fi
+          echo "Download complete: $ACTUAL_LATEST_NAME."
+
+          echo "Renaming $ACTUAL_LATEST_NAME to $REPO_TARBALL_PATH..."
+          mv "$ACTUAL_LATEST_NAME" "$REPO_TARBALL_PATH"
+          if [ ! -f "$REPO_TARBALL_PATH" ]; then
+            echo "Failed to rename $ACTUAL_LATEST_NAME to $REPO_TARBALL_PATH."
+            exit 1
+          fi
+          echo "Renamed to $REPO_TARBALL_PATH."
+
+          echo "Updating $VERSION_FILE_PATH with new version: $ACTUAL_LATEST_NAME"
+          echo "$ACTUAL_LATEST_NAME" > "$VERSION_FILE_PATH"
+          echo "Version file updated."
+
+      - name: Commit and push changes
+        if: steps.check_version.outputs.NEEDS_UPDATE == 'true'
+        run: |
+          REPO_TARBALL_PATH="angie-latest.tar.gz"
+          VERSION_FILE_PATH=".current_angie_version"
+          ACTUAL_LATEST_NAME="${{ steps.get_actual_latest_version.outputs.ACTUAL_LATEST_TARBALL_NAME }}"
+
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          git add "$REPO_TARBALL_PATH" "$VERSION_FILE_PATH"
+          
+          # Check if there are changes to commit
+          # This check is important because 'git add' might not stage anything if files haven't changed content-wise,
+          # though in our logic, if NEEDS_UPDATE is true, changes should have occurred.
+          if git diff --staged --quiet; then
+            echo "No effective changes were staged for commit, though an update was indicated. This might be an issue."
+            # Optionally, exit 1 here if this state is unexpected and should fail the workflow
+          else
+            git commit -m "Update angie-latest.tar.gz to version $ACTUAL_LATEST_NAME"
+            git push
+            echo "Changes for $ACTUAL_LATEST_NAME committed and pushed."
+          fi
